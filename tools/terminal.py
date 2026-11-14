@@ -69,6 +69,7 @@ class TerminalExecutor:
                 "stdout": self.sec.redact(proc.stdout or "")[:20_000],
                 "stderr": self.sec.redact(proc.stderr or "")[:20_000],
             }
+            self.sec.audit("SHELL", command, exit_code=proc.returncode)
             return result
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": f"Command timed out after {timeout or self.timeout}s."}

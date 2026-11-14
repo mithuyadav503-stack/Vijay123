@@ -2,11 +2,15 @@
 
 import datetime
 import json
+import os
 import re
+import sys
 from pathlib import Path
 
-from core.llm import LLMError
+from core.providers import PROVIDER_PRESETS, ProviderError
 from core.security import PermissionDenied
+
+LLMError = ProviderError
 
 SYSTEM_PROMPT = """You are ULTIMATE AI AGENT, an expert AI coding and cybersecurity assistant running on Android Termux, powered by OpenRouter.
 
@@ -25,7 +29,7 @@ Rules:
 
 class Agent:
     def __init__(self, llm, memory, security, file_manager, terminal, coding, debugger,
-                 crypto, blockchain, security_analyzer, planner, settings):
+                 crypto, blockchain, security_analyzer, planner, settings, tools=None):
         self.llm = llm
         self.memory = memory
         self.sec = security
@@ -38,6 +42,7 @@ class Agent:
         self.sec_analyzer = security_analyzer
         self.planner = planner
         self.settings = settings
+        self.tools = tools
         self.running = True
 
     # ---------------- command routing ----------------
@@ -53,6 +58,9 @@ class Agent:
             "/create": self.cmd_create, "/projects": self.cmd_projects,
             "/memory": self.cmd_memory, "/history": self.cmd_history,
             "/settings": self.cmd_settings, "/clear": self.cmd_clear, "/exit": self.cmd_exit,
+            "/provider": self.cmd_provider, "/tools": self.cmd_tools,
+            "/plan": self.cmd_plan, "/task": self.cmd_task,
+            "/doctor": self.cmd_doctor, "/audit": self.cmd_audit,
         }
         fn = handler.get(cmd)
         if fn is None:
@@ -90,12 +98,28 @@ class Agent:
                 mem_context.append(f"[{cat}] {entry['text']}")
         if mem_context:
             messages.append({"role": "system", "content": "Relevant memory:\n" + "\n".join(mem_context)})
-        messages.extend(self.memory.recent_history(10))
+        messages.extend(self.trimmed_history())
         messages.append({"role": "user", "content": user_text})
         print("  ...thinking")
         reply = self.llm.chat(messages)
         self.memory.append_history("assistant", reply)
         print(f"\n{reply}\n")
+
+    # ---------------- context trimming (prevents repetition across turns) ----------------
+    MAX_CONTEXT_CHARS = 6000
+    MAX_MESSAGE_CHARS = 1200
+
+    def trimmed_history(self):
+        """Recent history, per-message truncated, total-capped, so the model does not
+        parrot earlier turns."""
+        history = self.memory.recent_history(8)
+        trimmed = [{"role": m["role"], "content": m["content"][:self.MAX_MESSAGE_CHARS]}
+                   for m in history]
+        total = sum(len(m["content"]) for m in trimmed)
+        while total > self.MAX_CONTEXT_CHARS and len(trimmed) > 2:
+            total -= len(trimmed[0]["content"])
+            trimmed.pop(0)
+        return trimmed
 
     # ---------------- intent detection (local tools without burning tokens) ----------------
     def detect_intent(self, text):
@@ -212,16 +236,21 @@ class Agent:
 
     def cmd_status(self, arg):
         key_ok = self.llm.key_exists()
+        prov = self.llm.status() if hasattr(self.llm, "status") else {"active": "openrouter"}
+        session = prov.get("session_usage", {})
+        mem = self.memory.status()
         print(f"""
   ULTIMATE AI AGENT - STATUS
   --------------------------
-  API key        : {'configured' if key_ok else 'NOT SET (use /apikey)'}
-  API connection : {'connected' if key_ok and self.llm.model else 'not verified'}
+  Provider       : {prov.get('active') or 'not configured'} ({'key set' if key_ok else 'NO KEY'})
+  API connection : {'verified' if key_ok and self.llm.model else 'not verified'}
   Model          : {self.llm.model or 'not selected'}
   Workspace      : {self.sec.workspace}
-  Max permission : LEVEL {self.sec.max_level}
-  Memory         : {json.dumps(self.memory.status()['entries'])}
-  History        : {self.memory.history_count()} turns
+  Permission     : LEVEL {self.sec.max_level} / 5
+  Tools          : {len(self.tools.tools) if self.tools else 0} registered (see /tools)
+  Memory         : {json.dumps(mem['entries'])}
+  History        : {mem['history_turns']} turns
+  This session   : {session.get('requests', 0)} AI requests, {session.get('prompt_tokens', 0)}+{session.get('completion_tokens', 0)} tokens, ~${session.get('cost_usd', 0):.4f}, {session.get('fallbacks', 0)} fallbacks
   Crypto library : {'cryptography installed' if self._have_crypto() else 'cryptography NOT installed (AES/RSA disabled)'}
 """)
 
@@ -434,6 +463,174 @@ class Agent:
     def _save_settings(self):
         settings_file = Path(__file__).resolve().parent.parent / "config" / "settings.json"
         settings_file.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+
+
+    # ---------------- provider / tools / plan / task / doctor / audit ----------------
+    def cmd_provider(self, arg):
+        parts = arg.split(maxsplit=1)
+        op = parts[0].lower() if parts else "list"
+        if op == "list" or not arg:
+            st = self.llm.status()
+            print(f"\n  Active provider: {st['active'] or '(none)'}")
+            for name, info in st["providers"].items():
+                mark = " <- ACTIVE" if name == st["active"] else ""
+                print(f"   - {name} [{info['kind']}] key={'yes' if info['has_key'] else 'no'} "
+                      f"model={info['model'] or '-'}{mark}")
+            print("\n  Known presets: " + ", ".join(PROVIDER_PRESETS.keys()))
+            print("  Add: /provider add <name>   (interactive)")
+            print("  Use: /provider use <name>   Test: /provider test <name>")
+            return
+        if op == "add":
+            if not parts[1:]:
+                print("  Usage: /provider add <preset-name or custom-name>")
+                print(f"  Presets: {', '.join(PROVIDER_PRESETS.keys())}")
+                return
+            name = parts[1].strip()
+            if name in self.llm.names():
+                print(f"  Provider '{name}' already configured. Overwriting (old key removed).")
+            preset = PROVIDER_PRESETS.get(name)
+            if preset:
+                kind, base_url = preset["kind"], preset["base_url"]
+                print(f"  Preset '{name}': {preset['note']}")
+            else:
+                kind = input("  Kind (openai/gemini/ollama) [openai]: ").strip() or "openai"
+                base_url = input("  Base URL (e.g. https://host/v1): ").strip()
+                if not base_url:
+                    print("  Cancelled: base URL required for custom providers.")
+                    return
+            api_key = None
+            if kind != "ollama":
+                import getpass
+                api_key = getpass.getpass("  API key (hidden, empty to skip): ").strip()
+            try:
+                self.llm.add_provider(name, kind, base_url=base_url, api_key=api_key)
+                self.llm.set_active(name)
+                print(f"  Provider '{name}' added and activated.")
+                result = self.llm.validate_key()
+                print(f"  Test: {result['detail']}")
+                self.cmd_model("")
+            except (ValueError, LLMError) as exc:
+                print(f"  [!] {exc}")
+            return
+        if op == "use":
+            try:
+                self.llm.set_active(parts[1].strip())
+                print(f"  Active provider: {parts[1].strip()}")
+            except (ValueError, IndexError) as exc:
+                print(f"  [!] {exc or 'Usage: /provider use <name>'}")
+            return
+        if op == "test":
+            try:
+                result = self.llm.validate_key()
+                print(f"  {result['detail']}")
+            except LLMError as exc:
+                print(f"  [!] {exc}")
+            return
+        if op == "remove":
+            name = parts[1].strip() if parts[1:] else ""
+            if name:
+                self.llm.remove_provider(name)
+                print(f"  Provider '{name}' removed.")
+            return
+        print("  Unknown provider op. Use list | add | use | test | remove")
+
+    def cmd_tools(self, arg):
+        tools = self.tools.list()
+        print(f"\n  {len(tools)} tools registered:\n")
+        for t in tools:
+            print(f"   [{t['min_level']}] {t['name']:<16} {t['description']}")
+
+    def cmd_plan(self, arg):
+        state = self.planner.load_state()
+        if not state:
+            print("  No plan yet. Run /code <task> to create one.")
+            return
+        print(f"\n  PLAN: {state['task']} (updated {state.get('updated', '?')})")
+        for i, step in enumerate(state["steps"], 1):
+            print(f"   {i}. [{step.get('status', '?')}] {step.get('step', step)}")
+        refl = state.get("reflection") or self.planner.load_state().get("reflection")
+        if refl:
+            print(f"\n  REFLECT: {refl.get('verdict')} | {refl.get('missing')} | next: {refl.get('next_action')}")
+
+    def cmd_task(self, arg):
+        parts = arg.split(maxsplit=1)
+        op = parts[0].lower() if parts else "list"
+        if op == "add" and parts[1:]:
+            self.memory.add("tasks_pending", parts[1].strip())
+            pending = self.memory.list("tasks_pending")
+            print(f"  Task added (#{len(pending) - 1}). Use /task list to see all.")
+        elif op == "done":
+            try:
+                idx = int(parts[1]) if parts[1:] else -1
+                pending = self.memory.list("tasks_pending")
+                if not pending:
+                    print("  No pending tasks.")
+                    return
+                task = pending.pop(idx)
+                self.memory.add("tasks_completed", task["text"])
+                self.memory._save()
+                print(f"  Done: {task['text'][:80]}")
+            except (ValueError, IndexError) as exc:
+                print(f"  [!] {exc}. Usage: /task done <index> (see /task list)")
+        elif op == "list":
+            pending = self.memory.list("tasks_pending")
+            done = self.memory.list("tasks_completed")
+            print(f"\n  Pending ({len(pending)}):")
+            for i, t in enumerate(pending):
+                print(f"   {i}. {t['text'][:90]}")
+            print(f"  Completed ({len(done)}):")
+            for t in done[-5:]:
+                print(f"   + {t['text'][:90]}")
+        else:
+            print("  Usage: /task add <text> | /task done <index> | /task list")
+
+    def cmd_doctor(self, arg):
+        print("\n  DOCTOR - environment check\n" + "  " + "-" * 40)
+        checks = []
+        checks.append(("python", f"{sys.version.split()[0]} at {sys.executable or 'python'}", True))
+        for mod, label in [("requests", "HTTP client"), ("cryptography", "AES/RSA/Ed25519"),
+                           ("sqlite3", "SQLite"), ("json", "JSON")]:
+            try:
+                __import__(mod)
+                checks.append((label, "installed", True))
+            except ImportError:
+                checks.append((label, "MISSING - pip install " + mod, False))
+        ws_writable = os.access(self.sec.workspace, os.W_OK) if Path(self.sec.workspace).exists() else False
+        checks.append(("workspace writable", str(self.sec.workspace), ws_writable))
+        st = self.llm.status() if hasattr(self.llm, "status") else {}
+        checks.append(("provider", st.get("active") or "none configured", bool(st.get("active"))))
+        checks.append(("model", self.llm.model or "not selected", bool(self.llm.model)))
+        try:
+            import requests as _rq
+            r = _rq.head("https://openrouter.ai", timeout=8)
+            net = f"reachable (HTTP {r.status_code})"
+            ok = True
+        except Exception as exc:
+            net = f"UNREACHABLE ({type(exc).__name__})"
+            ok = False
+        checks.append(("network", net, ok))
+        if os.environ.get("PREFIX"):
+            checks.append(("termux", f"PREFIX={os.environ['PREFIX']}", True))
+        width = max(len(c[0]) for c in checks)
+        all_ok = True
+        for name, detail, ok in checks:
+            all_ok &= ok
+            print(f"  {name:<{width}} : {'OK ' if ok else 'FAIL'}  {detail}")
+        print(f"\n  VERDICT: {'ALL CHECKS PASSED' if all_ok else 'SOME CHECKS FAILED (see above)'}")
+
+    def cmd_audit(self, arg):
+        audit_file = self.sec.log_file.parent / "audit.log"
+        if not audit_file.exists():
+            print("  Audit log is empty.")
+            return
+        try:
+            n = int(arg) if arg else 20
+        except ValueError:
+            n = 20
+        lines = audit_file.read_text().splitlines()[-n:]
+        print(f"\n  Last {len(lines)} audit entries (logs/audit.log):")
+        for line in lines:
+            print(f"   {line}")
 
     def cmd_clear(self, arg):
         print("\033[2J\033[H", end="")

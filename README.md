@@ -9,8 +9,23 @@ inside **Android Termux**, powered by the **OpenRouter API**.
 
 ## Features
 
-- **AI Brain (OpenRouter)** — secure API-key entry (hidden input), real validation against
-  `openrouter.ai`, model browsing/switching, Hindi/English conversation, expert-level help
+- **Multi-provider AI brain** — pluggable providers: OpenRouter, OpenAI, Groq, Together,
+  Mistral, Gemini (native), any OpenAI-compatible server, and local Ollama/llama.cpp.
+  Automatic fallback chain (429/5xx/timeout → next provider, exponential backoff),
+  SSE streaming, token + cost accounting. Keys validated against auth-required endpoints.
+- **Tool registry** — 18 schema'd tools (files, grep, shell, python_eval, sqlite, diff,
+  hexdump, download...) with timeouts, structured results, and permission enforcement.
+- **Planning loop** — PLAN → ACT → OBSERVE → REFLECT with persistent plan state (`/plan`)
+  and long-horizon task tracking (`/task add|done|list`).
+- **Audit log** — every shell command and file write with timestamp + exit code (`/audit`).
+- **`/doctor`** — one-shot environment verification (deps, network, workspace, provider).
+- **ECDSA lab** — educational secp256k1: sign/verify, RFC 6979, nonce-reuse key recovery
+  demonstrated on self-generated toy keys.
+- **Defensive wallet audit** — detects Bitcoin Core/Electrum/Blockchain.com/MetaMask/
+  MultiBit/Armory wallet files, reports encryption status and weak KDF parameters.
+  Local-only; never extracts or transmits key material.
+- **AI conversation** — secure API-key entry (hidden input), real validation,
+  model browsing/switching, Hindi/English chat, expert-level help
   across Python, JS/TS, C/C++, Java, Rust, Go, Bash, Linux/Termux, databases, APIs, web,
   automation, cryptography, blockchain/Bitcoin, and defensive security.
 - **Autonomous coding engine** — `PLAN → WRITE CODE → REVIEW → EXECUTE → TEST → DEBUG → FIX → VERIFY`
@@ -110,7 +125,7 @@ ULTIMATE_AI_AGENT/
 │   └── credentials.json API key (obfuscated, chmod 600)
 ├── core/
 │   ├── agent.py         Command routing, intent detection, LLM context
-│   ├── llm.py           OpenRouter client (validation, models, chat)
+│   ├── providers.py     Multi-provider layer (OpenRouter/OpenAI/Gemini/Ollama + fallback)
 │   ├── memory.py        Persistent memory + history
 │   ├── planner.py       PLAN→VERIFY workflow engine
 │   └── security.py      Permission levels, path sandbox, command blocklist, redaction
@@ -120,7 +135,9 @@ ULTIMATE_AI_AGENT/
 │   ├── coding.py        Projects, editing, running, reports
 │   ├── debugger.py      Traceback diagnosis (Hindi) + auto-repair
 │   ├── crypto.py        Hashes, HMAC, AES, RSA, Ed25519
-│   ├── blockchain.py    BTC address/tx analysis, wallet audit
+│   ├── blockchain.py    BTC address/tx analysis, defensive wallet format audit
+│   ├── ecdsa_lab.py     Educational secp256k1 (RFC6979, nonce-reuse demo)
+│   ├── registry.py      Tool registry (schemas, dispatch, timeouts)
 │   └── security_audit.py Static analysis, pip-audit, OWASP review
 ├── tests/selftest.py    80 offline self-tests (incl. mock OpenRouter server)
 ├── data/                memory.json, history.jsonl

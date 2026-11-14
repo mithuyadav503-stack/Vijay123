@@ -249,3 +249,103 @@ class BlockchainToolkit:
             "warning": "This audit is heuristic and local-only. Nothing was uploaded.",
             "findings": findings,
         }
+
+    # ---------------- defensive wallet format detection (local audit only) ----------------
+    def detect_wallet_format(self, path):
+        """Identify a wallet file's format and report its security posture.
+
+        STRICTLY DEFENSIVE: reports which key material the file *contains* and how well
+        it is protected. It never decrypts, extracts, or exports anything.
+        """
+        p = self.sec.validate_path(path)
+        self.sec.check(1, f"wallet format audit of {p.name}")
+        head = b""
+        try:
+            with open(p, "rb") as fh:
+                head = fh.read(4096)
+        except OSError as exc:
+            return {"error": f"Cannot read file: {exc}"}
+        text = None
+        try:
+            text = head.decode("utf-8", errors="strict")
+            is_json = text.lstrip().startswith(("{", "["))
+        except UnicodeDecodeError:
+            is_json = False
+
+        fmt = "unknown"
+        encrypted = None
+        findings = []
+
+        if head.startswith((b"\x00\x05\x15\xdb", b"\x04\x15\x61\xdb", b"\x09\x05\x15\xdb")):
+            fmt = "Bitcoin Core (Berkeley DB)"
+            has_mkey = b"mkey" in head
+            has_ckey = b"ckey" in head
+            has_plain = b"privkey" in head or b"key\x00" in head
+            if has_ckey:
+                encrypted = True
+                findings.append({"level": "OK", "note": "Private keys appear encrypted (ckey records present)."})
+            elif has_plain and not has_mkey:
+                encrypted = False
+                findings.append({"level": "CRITICAL", "note": "No mkey/ckey records found: private keys may be stored UNENCRYPTED."})
+            elif has_mkey:
+                encrypted = True
+                findings.append({"level": "OK", "note": "Encrypted master key (mkey) present."})
+            else:
+                encrypted = None
+                findings.append({"level": "INFO", "note": "First 4KB shows no key records; scan deeper sections manually if needed."})
+        elif is_json and '"seed_version"' in text:
+            fmt = "Electrum wallet (JSON)"
+            encrypted = False
+            if '"xprv"' in text or '"xpriv"' in text:
+                findings.append({"level": "CRITICAL", "note": "Extended PRIVATE key (xprv) stored in plaintext JSON."})
+            if '"seed"' in text:
+                findings.append({"level": "CRITICAL", "note": "Seed phrase stored in plaintext JSON."})
+            findings.append({"level": "MEDIUM", "note": "Electrum wallets are plaintext JSON by design. Protect the file itself."})
+        elif is_json and '"pbkdf2_iterations"' in text and '"payload"' in text:
+            fmt = "Blockchain.com wallet (AES JSON)"
+            encrypted = True
+            import re as _re
+            m = _re.search(r'"pbkdf2_iterations"\s*:\s*(\d+)', text)
+            iters = int(m.group(1)) if m else 0
+            if 0 < iters < 5000:
+                findings.append({"level": "HIGH", "note": f"PBKDF2 iterations only {iters} (<5000): passphrase brute-force is far cheaper than modern standards."})
+            elif iters:
+                findings.append({"level": "OK", "note": f"PBKDF2 iterations: {iters}."})
+        elif is_json and ('"kdfparams"' in text or '"cipher"' in text):
+            fmt = "Web3 secret storage (MetaMask / Trust Wallet keystore)"
+            encrypted = True
+            import re as _re
+            m = _re.search(r'"n"\s*:\s*(\d+)', text)
+            n = int(m.group(1)) if m else 0
+            if 0 < n < 16384:
+                findings.append({"level": "HIGH", "note": f"scrypt/pbkdf2 N={n} is below the 16384 baseline: weak KDF."})
+            elif n:
+                findings.append({"level": "OK", "note": f"KDF work factor N={n}."})
+        elif b"org.multibit" in head or b"multibit" in head.lower():
+            fmt = "MultiBit (.wallet)"
+            encrypted = None
+            findings.append({"level": "MEDIUM", "note": "MultiBit HD wallets are key-value formats; verify encryption status in the app."})
+        elif head[:1] == b"\x9e" or b"armory" in head.lower():
+            fmt = "Armory wallet (possibly fragmented)"
+            encrypted = None
+            findings.append({"level": "INFO", "note": "Armory format detected heuristically; confidence is lower."})
+        else:
+            findings.append({"level": "INFO", "note": "No known wallet signature in the first 4KB."})
+
+        import os as _os
+        mode = _os.stat(p).st_mode & 0o777
+        if mode & 0o077:
+            findings.append({"level": "HIGH", "note": f"File permissions {oct(mode)[-3:]}: readable by other users. Run: chmod 600 {p.name}"})
+        else:
+            findings.append({"level": "OK", "note": f"File permissions {oct(mode)[-3:]}: restricted."})
+
+        return {
+            "file": str(p),
+            "format": fmt,
+            "encrypted": encrypted,
+            "encrypted_meaning": {True: "key material is encrypted", False: "PLAINTEXT key material present",
+                                  None: "unknown"}.get(encrypted),
+            "findings": findings,
+            "disclaimer": "Defensive audit only: file contents were scanned for structure markers. "
+                          "Nothing was decrypted, extracted, or transmitted.",
+        }

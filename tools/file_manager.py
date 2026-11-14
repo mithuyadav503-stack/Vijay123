@@ -114,6 +114,7 @@ class FileManager:
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(content)
         self.sec.log("WRITE", f"{p} ({len(content)} bytes, backup={backed_up})")
+        self.sec.audit("WRITE", f"{p} ({len(content)} bytes)")
         return {"path": str(p), "bytes": len(content), "backup": backed_up, "overwritten": p.exists() and backed_up is not None}
 
     def append_file(self, path, content):

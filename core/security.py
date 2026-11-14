@@ -169,6 +169,17 @@ class SecurityManager:
         return p
 
     # ---------- logging ----------
+    def audit(self, event, detail="", exit_code=None):
+        """Append to audit.log: timestamp | event | exit code | redacted detail."""
+        line = (f"{datetime.datetime.now().isoformat(timespec='seconds')} | {event} | "
+                f"exit={exit_code if exit_code is not None else '-'} | {self.redact(detail)}")
+        audit_file = self.log_file.parent / "audit.log"
+        try:
+            with open(audit_file, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
     def log(self, event, detail=""):
         line = f"{datetime.datetime.now().isoformat(timespec='seconds')} | {event} | {self.redact(detail)}"
         try:

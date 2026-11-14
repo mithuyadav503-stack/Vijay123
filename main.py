@@ -8,13 +8,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.llm import OpenRouterClient, LLMError
+from core.providers import ProviderManager, ProviderError, PROVIDER_PRESETS
 from core.memory import MemoryManager
 from core.security import SecurityManager
 from core.agent import Agent
 from core.planner import Planner
 from tools.file_manager import FileManager
 from tools.terminal import TerminalExecutor
+from tools.registry import ToolRegistry
 from tools.coding import CodingEngine
 from tools.debugger import Debugger
 from tools.crypto import CryptoToolkit
@@ -30,7 +31,7 @@ BANNER = """
      \\___/ \\___/|_|  |_/_/   \\_\\_| \\_|_| \\_| |_| |_____|
   ==========================================================
    ULTIMATE AI AGENT
-   Powered by OpenRouter
+   Powered by OpenRouter and other providers
    Running on Termux
   ==========================================================
 """
@@ -74,68 +75,71 @@ def resolve_workspace(settings):
 
 
 def first_run_setup(llm):
-    """Welcome + API key setup + validation + model selection."""
-    print(BANNER)
-    try:
-        return _first_run_setup(llm)
-    except (EOFError, KeyboardInterrupt):
-        print("\n  Setup interrupted. Starting in OFFLINE mode. Use /apikey later to connect.")
+    """Welcome + provider/key setup + validation + model selection."""
+    print("  Welcome! This agent talks to AI providers through a pluggable layer.")
+    print("  Providers: " + ", ".join(PROVIDER_PRESETS.keys()) + "\n")
 
-
-def _first_run_setup(llm):
-    if not llm.key_exists():
-        print("  Welcome! This agent uses the OpenRouter API as its AI provider.")
-        print("  You need a free API key from https://openrouter.ai/keys\n")
-        while True:
+    if not llm.names():
+        print("  No providers configured yet. Quick setup:\n")
+        for i, (name, preset) in enumerate(PROVIDER_PRESETS.items(), 1):
+            print(f"   {i:2}. {name:<10} - {preset['note']}")
+        choice = input("\n  Pick a provider number (or Enter for openrouter): ").strip()
+        names = list(PROVIDER_PRESETS.keys())
+        name = names[int(choice) - 1] if choice.isdigit() and 0 < int(choice) <= len(names) \
+            else (choice if choice in PROVIDER_PRESETS else "openrouter")
+        preset = PROVIDER_PRESETS[name]
+        api_key = None
+        if preset["kind"] != "ollama":
             import getpass
-            key = getpass.getpass("  Enter your OpenRouter API key (hidden): ").strip()
-            if not key:
-                print("  No key entered. The agent will start in OFFLINE mode (tools work, AI chat disabled).")
-                return
-            llm.save_key(key)
-            print("  Key saved securely (file permission 600). Validating...")
-            try:
-                info = llm.validate_key()
-                print(f"  Connected! Key label: {info['label']} | usage so far: {info['usage']}")
-                break
-            except LLMError as exc:
-                print(f"  [!] {exc}")
-                llm.clear_key()
-                retry = input("  Try another key? [Y/n]: ").strip().lower()
-                if retry in ("n", "no"):
-                    print("  Starting in OFFLINE mode. Use /apikey later to connect.")
-                    return
-    else:
+            api_key = getpass.getpass(f"  Enter API key for '{name}' (hidden): ").strip()
         try:
-            info = llm.validate_key()
-            print(f"  OpenRouter connected (key: {info['label']})")
-        except LLMError as exc:
-            print(f"  [!] Saved API key problem: {exc}")
-            print("      Starting anyway - use /apikey to fix. Tools still work offline.")
+            llm.add_provider(name, preset["kind"], base_url=preset["base_url"], api_key=api_key)
+            llm.set_active(name)
+        except (ValueError, ProviderError) as exc:
+            print(f"  [!] {exc}\n  Starting in OFFLINE mode. Use /provider add later.")
             return
+    elif not llm.key_exists():
+        import getpass
+        active = llm.active_name()
+        key = getpass.getpass(f"  Enter API key for provider '{active}' (hidden): ").strip()
+        if key:
+            llm.save_key(key)
+        else:
+            print("  No key entered. Starting in OFFLINE mode (tools work, AI chat disabled).")
+            return
+
+    print("  Validating connection...")
+    try:
+        info = llm.validate_key()
+        print(f"  Connected! {info['detail']}")
+    except ProviderError as exc:
+        print(f"  [!] {exc}")
+        print("      Starting anyway - use /provider test or /apikey to fix. Tools still work offline.")
+        return
 
     saved_model = llm.load_saved_model()
     if saved_model:
-        llm.model = saved_model
         print(f"  Model: {saved_model} (change anytime with /model)")
-    else:
-        print("\n  Now select a model. Fetching the list from OpenRouter...")
-        try:
-            models = llm.list_models()
-            free = [m for m in models if m["free"]]
-            if free:
-                print(f"  {len(free)} free models available. Top options:")
-                for i, m in enumerate(free[:10], 1):
-                    print(f"   {i:2}. {m['id']}")
-                choice = input("\n  Pick a number (or Enter for the first one): ").strip()
-                idx = int(choice) - 1 if choice.isdigit() and 0 < int(choice) <= min(10, len(free)) else 0
-                llm.set_model(free[idx]["id"])
-            else:
-                llm.set_model(models[0]["id"])
-            print(f"  Model selected: {llm.model}")
-        except LLMError as exc:
-            print(f"  [!] Could not fetch models: {exc}")
-            print("      Set one later with /model (e.g. openai/gpt-4o-mini or meta-llama/llama-3.1-8b-instruct:free)")
+        return
+    print("\n  Now select a model. Fetching the list...")
+    try:
+        models = llm.list_models()
+        if not models:
+            print("  [!] No models returned. Set one manually with /model <model-id>")
+            return
+        free = [m for m in models if m.get("free")]
+        pool = free or models
+        print(f"  {len(models)} models available ({len(free)} free). Top options:")
+        for i, m in enumerate(pool[:10], 1):
+            ctx = f"ctx {m['context']}" if m.get("context") else ""
+            print(f"   {i:2}. {m['id']}  {ctx}")
+        choice = input("\n  Pick a number (or Enter for the first one): ").strip()
+        idx = int(choice) - 1 if choice.isdigit() and 0 < int(choice) <= min(10, len(pool)) else 0
+        llm.set_model(pool[idx]["id"])
+        print(f"  Model selected: {llm.model}")
+    except ProviderError as exc:
+        print(f"  [!] Could not fetch models: {exc}")
+        print("      Set one later with /model <model-id>")
 
 
 def build_agent():
@@ -144,7 +148,7 @@ def build_agent():
     workspace = resolve_workspace(settings)
 
     sec = SecurityManager(workspace, settings, log_file=PROJECT_ROOT / "logs" / "security.log")
-    llm = OpenRouterClient(PROJECT_ROOT / "config", log_fn=lambda *_: None)
+    llm = ProviderManager(PROJECT_ROOT / "config", log_fn=sec.log)
     memory = MemoryManager(PROJECT_ROOT / "data", redact_fn=sec.redact)
     fm = FileManager(sec, backup_dir=PROJECT_ROOT / "backups")
     term = TerminalExecutor(sec, workdir=workspace)
@@ -154,15 +158,19 @@ def build_agent():
     blockchain = BlockchainToolkit(sec, file_manager=fm)
     sec_analyzer = SecurityAnalyzer(sec, fm, term)
     planner = Planner(None)
+    registry = ToolRegistry(sec, fm, term, crypto)
     agent = Agent(llm, memory, sec, fm, term, coding, debugger, crypto,
-                  blockchain, sec_analyzer, planner, settings)
+                  blockchain, sec_analyzer, planner, settings, tools=registry)
     planner.agent = agent
     return agent
 
 
 def main():
     agent = build_agent()
-    first_run_setup(agent.llm)
+    try:
+        first_run_setup(agent.llm)
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Setup interrupted. Starting in OFFLINE mode. Use /provider add later.")
 
     print(BANNER)
     agent.cmd_status("")
@@ -181,7 +189,7 @@ def main():
         else:
             try:
                 agent.chat(line)
-            except LLMError as exc:
+            except ProviderError as exc:
                 print(f"\n  [AI ERROR - {exc.kind}] {exc}")
                 if exc.kind == "network":
                     print("  Tip: check your internet connection, then try again.")

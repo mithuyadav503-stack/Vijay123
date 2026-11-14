@@ -1,7 +1,11 @@
-"""Planner: builds an explicit PLAN -> CODE -> REVIEW -> EXECUTE -> TEST -> FIX -> VERIFY workflow."""
+"""Planner: builds an explicit PLAN -> CODE -> REVIEW -> EXECUTE -> TEST -> FIX -> VERIFY workflow.
 
+Plan state persists to data/plan.json so /plan can show progress across sessions."""
+
+import datetime
 import json
 import re
+from pathlib import Path
 
 WORKFLOW_STAGES = ["PLAN", "WRITE CODE", "REVIEW", "EXECUTE", "TEST", "DEBUG", "FIX", "VERIFY"]
 
@@ -9,6 +13,51 @@ WORKFLOW_STAGES = ["PLAN", "WRITE CODE", "REVIEW", "EXECUTE", "TEST", "DEBUG", "
 class Planner:
     def __init__(self, agent):
         self.agent = agent
+
+    @property
+    def state_file(self):
+        if self.agent:
+            return Path(self.agent.sec.workspace).parent / "data" / "plan.json"
+        return Path("data/plan.json")
+
+    # ---------------- plan state persistence ----------------
+    def save_state(self, task, steps):
+        state = {
+            "task": task,
+            "steps": [dict(s) for s in steps],
+            "updated": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+        return state
+
+    def load_state(self):
+        if self.state_file.exists():
+            try:
+                return json.loads(self.state_file.read_text())
+            except Exception:
+                return None
+        return None
+
+    def reflect(self, report):
+        """Self-critique pass: is the goal met, what's missing, next action."""
+        errors = report.get("errors", [])
+        skipped = [s for s in report.get("steps", []) if "skipped" in s.get("status", "")]
+        if errors:
+            verdict = "goal NOT met"
+            missing = f"{len(errors)} step(s) failed"
+            nxt = "Use /debug on the failing script, then re-run /code"
+        elif skipped:
+            verdict = "goal mostly met"
+            missing = f"{len(skipped)} step(s) skipped"
+            nxt = "Inspect skipped steps with /plan"
+        else:
+            verdict = "goal met"
+            missing = "nothing blocking"
+            nxt = "Verify results, then mark the task done with /task done"
+        reflection = {"verdict": verdict, "missing": missing, "next_action": nxt}
+        report["reflection"] = reflection
+        return reflection
 
     def build_plan(self, task):
         """Ask the LLM for a structured plan; fall back to a deterministic template offline."""
@@ -104,4 +153,8 @@ class Planner:
             report["steps"].append(entry)
             print(f"   -> {entry['status']}")
         report["status"] = "completed_with_errors" if report.get("errors") else "completed"
+        self.reflect(report)
+        self.save_state(report["task"], report["steps"])
+        print(f"\n  REFLECT: {report['reflection']['verdict']} | {report['reflection']['missing']}"
+              f" | next: {report['reflection']['next_action']}")
         return report
