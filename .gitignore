@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+workspace/
+config/credentials.json
+data/memory.json
+data/history.jsonl
+logs/*.log
+backups/*
+!backups/.gitkeep
+reports/*
+!reports/.gitkeep

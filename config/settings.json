@@ -1,0 +1,6 @@
+{
+  "workspace": "~/storage/downloads",
+  "max_permission_level": 3,
+  "confirm_sensitive": true,
+  "extra_allowed_paths": []
+}
