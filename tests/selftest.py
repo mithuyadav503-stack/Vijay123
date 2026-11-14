@@ -35,6 +35,8 @@ from tools.security_audit import SecurityAnalyzer
 from tools.ecdsa_lab import (keygen, sign, verify, point_mul, recover_from_nonce_reuse,
                              rfc6979_nonce, demo_nonce_reuse, rfc6979_stability_check)
 from core.planner import Planner
+import main as agent_main
+from unittest import mock
 
 PASS, FAIL = 0, 0
 
@@ -541,6 +543,47 @@ def _raises(fn):
         return True
 
 
+
+def test_startup_recovery(tmp):
+    """The reported bug: a 401 during setup must not skip model selection."""
+    print("\n=== TEST: startup recovery (401 -> re-key -> model picker reached) ===")
+    cfg_dir = tmp / "startup_cfg"
+    pm = ProviderManager(cfg_dir, log_fn=lambda *_: None)
+    calls = {"validate": 0}
+
+    def flaky_validate():
+        calls["validate"] += 1
+        if calls["validate"] == 1:
+            raise ProviderError("Invalid or unauthorized API key (401).", kind="auth")
+        return {"valid": True, "detail": "mock: key accepted"}
+
+    pm.add_provider("mock", "openai", base_url="http://127.0.0.1:1/v1",
+                    api_key="bad-key-first", default_model=None)
+    pm.validate_key = flaky_validate
+    pm.list_models = lambda: [{"id": "mock/model-1", "name": "M1", "context": 100, "free": True}]
+
+    answers = iter(["new-key-456", "1"])  # re-enter key, then pick model 1
+    getpass_answers = iter(["new-key-456"])
+    with mock.patch("builtins.input", lambda *a, **k: next(answers)), \
+         mock.patch("getpass.getpass", lambda *a, **k: next(getpass_answers)):
+        agent_main.first_run_setup(pm)
+
+    check("model selected after 401 recovery", pm.model == "mock/model-1", str(pm.model))
+    check("validation retried with new key", calls["validate"] == 2)
+    check("new key stored", pm.key_exists())
+    shutil.rmtree(cfg_dir, ignore_errors=True)
+
+    pm2 = ProviderManager(tmp / "startup_cfg2", log_fn=lambda *_: None)
+    pm2.add_provider("mock", "openai", base_url="http://127.0.0.1:1/v1",
+                     api_key=None, default_model=None)
+    answers2 = iter([""])  # empty key -> offline, must return cleanly
+    with mock.patch("builtins.input", lambda *a, **k: next(answers2)), \
+         mock.patch("getpass.getpass", lambda *a, **k: ""):
+        agent_main.first_run_setup(pm2)
+    check("empty key enters offline mode without crash", True)
+    shutil.rmtree(tmp / "startup_cfg2", ignore_errors=True)
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="uai_test_"))
     try:
@@ -560,6 +603,7 @@ def main():
         test_ecdsa_lab()
         test_registry(registry, sec, tmp / "downloads")
         test_providers(tmp)
+        test_startup_recovery(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

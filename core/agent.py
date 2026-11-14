@@ -230,7 +230,7 @@ class Agent:
         self.llm.save_key(key)
         print("  Key stored (file permissions 600). Validating with OpenRouter...")
         info = self.llm.validate_key()
-        print(f"  Valid. Key label: {info['label']} | usage so far: {info['usage']}")
+        print(f"  Valid. {info['detail']}")
         if not self.llm.model:
             self.cmd_model("")
 

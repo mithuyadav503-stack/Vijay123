@@ -3,6 +3,12 @@
 ## v2.0.0 — Operator upgrade
 
 ### Fixed
+- **Startup recovery loop**: a 401/invalid key during first-run setup no longer skips
+  model selection. Setup now offers [r]e-key / [p]ick another provider / [s]kip, and the
+  model picker is always reached (fixes the "No model selected" restart loop).
+- **`/apikey` KeyError**: `validate_key()` returns `{"valid","detail"}`; the command now
+  prints `detail` instead of the old `label`/`usage` fields.
+- **`PermissionDenied` NameError in main.py**: exception was caught but never imported.
 - **Self-test is now fully transactional**: every test runs create → assert → rename → cleanup
   inside try/finally. A failure can no longer leave half-built state or crash the run
   (fixes the `FileNotFoundError .../proj/renamed_copy.py` crash).
